@@ -33,6 +33,9 @@ QTM_IMAGE_CAMERA = 1
 # as "" if no password is configured in QTM.
 QTM_RT_PASSWORD = ""
 
+# Diagnostic counter of how many packets on_packet has received.
+_packet_count = 0
+
 
 def create_lsl_outlet():
     """
@@ -76,8 +79,19 @@ def on_packet(packet):
     Raises:
         None
     """
+    global _packet_count
+    _packet_count += 1
     outlet.push_sample([packet.framenumber])
-    print("Framenumber: {}".format(packet.framenumber))
+    # Diagnostic: packet count distinguishes "one packet then silence" (stream
+    # stops) from "many packets all numbered 1" (counter not advancing).
+    print(
+        "packet #{}  framenumber={}  timestamp={}  components={}".format(
+            _packet_count,
+            packet.framenumber,
+            packet.timestamp,
+            list(packet.components.keys()),
+        )
+    )
 
 
 async def setup():
