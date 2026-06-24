@@ -1,12 +1,16 @@
 """
     Stream the QTM real-time frame number into LSL.
 
-    Streams only the frame number of the markerless (skeleton) component so that
+    Streams only the QTM frame number (the "frame N of M" shown in QTM) so that
     other LSL streams (e.g. EEG) can be synchronised to the Qualisys capture
     timeline afterwards.
 
-    Start QTM first, load/record a markerless session, then Play -> Play with
-    Real-Time output before running this script.
+    The frame number lives in the header of every QTM real-time data packet, so
+    we request frames with NO data components -- no markers, skeleton or images
+    are transmitted, only the bare frame header.
+
+    Start QTM first, then record live (or Play -> Play with Real-Time output)
+    before running this script.
 """
 
 import asyncio
@@ -17,21 +21,8 @@ import qtm_rt
 # QTM host. Use "127.0.0.1" when this script runs on the QTM machine.
 QTM_HOST = "127.0.0.1"
 
-# QTM markerless capture rate in Hz. Adjust to match your project settings.
+# QTM capture rate in Hz. Adjust to match your project settings.
 QTM_FRAME_RATE = 85
-
-# ID of a camera to receive RT images from (1 = first camera). For a video-only
-# (Miqus Video) capture the image stream is the only per-frame data, so we ask
-# QTM to send a tiny image per frame purely to carry the frame number in its
-# header -- the pixels are never read. Set this to any camera that exists in
-# your system.
-QTM_IMAGE_CAMERA = 1
-
-# Real-time client control password, as set in QTM under
-# Project Options -> Real-Time output. Changing settings (here: enabling image
-# transmission) requires becoming the controlling "master" client first. Leave
-# as "" if no password is configured in QTM.
-QTM_RT_PASSWORD = ""
 
 # Diagnostic counter of how many packets on_packet has received.
 _packet_count = 0
@@ -97,7 +88,7 @@ def on_packet(packet):
 async def setup():
     """
     Connects to the Qualisys system and sets up an LSL outlet for streaming the
-    QTM real-time frame number (read from the packet header of the image stream).
+    QTM real-time frame number (read from each data packet's header).
 
     Returns:
         None
@@ -115,42 +106,11 @@ async def setup():
     outlet = create_lsl_outlet()
     input("Start LabRecorder ... Press Enter to continue")
 
-    # Tell QTM to actually transmit RT images for one camera. Subscribing to the
-    # "image" component is NOT enough on its own -- QTM only sends camera images
-    # over real-time when a client requests them via this XML settings message.
-    # We request the smallest possible image (we only want the frame number in
-    # the packet header), so the bandwidth/CPU cost is negligible.
-    image_settings = (
-        "<QTMSettings>"
-        "<Image>"
-        "<Camera>"
-        "<ID>{}</ID>"
-        "<Enabled>true</Enabled>"
-        "<Format>RAWGrayscale</Format>"
-        "<Width>64</Width>"
-        "<Height>64</Height>"
-        "<Left_Crop>0.0</Left_Crop>"
-        "<Top_Crop>0.0</Top_Crop>"
-        "<Right_Crop>1.0</Right_Crop>"
-        "<Bottom_Crop>1.0</Bottom_Crop>"
-        "</Camera>"
-        "</Image>"
-        "</QTMSettings>"
-    ).format(QTM_IMAGE_CAMERA)
-
-    # Enabling image transmission is a settings change, so we must become the
-    # controlling ("master") client first, then release control again so the QTM
-    # operator can still start/stop the recording from the GUI.
-    await connection.take_control(QTM_RT_PASSWORD)
-    await connection.send_xml(image_settings)
-    await connection.release_control()
-
-    # The frame number lives in the packet header, not in any component's data,
-    # so we only need QTM to emit a packet per frame. A video-only (Miqus Video)
-    # capture has no "skeleton"/"timecode" data, so we subscribe to "image" --
-    # every video frame produces a packet whose header carries the frame number.
-    # (on_packet never reads the image data itself.)
-    await connection.stream_frames(components=["image"], on_packet=on_packet)
+    # Request every frame with NO data components. QTM still sends a data packet
+    # per frame, and its header carries the QTM frame number -- no markers,
+    # skeleton or images are requested or transmitted. on_packet reads
+    # packet.framenumber from that header.
+    await connection.stream_frames(components=[], on_packet=on_packet)
 
 
 if __name__ == "__main__":
