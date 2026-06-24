@@ -27,6 +27,12 @@ QTM_FRAME_RATE = 85
 # your system.
 QTM_IMAGE_CAMERA = 1
 
+# Real-time client control password, as set in QTM under
+# Project Options -> Real-Time output. Changing settings (here: enabling image
+# transmission) requires becoming the controlling "master" client first. Leave
+# as "" if no password is configured in QTM.
+QTM_RT_PASSWORD = ""
+
 
 def create_lsl_outlet():
     """
@@ -117,7 +123,13 @@ async def setup():
         "</Image>"
         "</QTMSettings>"
     ).format(QTM_IMAGE_CAMERA)
+
+    # Enabling image transmission is a settings change, so we must become the
+    # controlling ("master") client first, then release control again so the QTM
+    # operator can still start/stop the recording from the GUI.
+    await connection.take_control(QTM_RT_PASSWORD)
     await connection.send_xml(image_settings)
+    await connection.release_control()
 
     # The frame number lives in the packet header, not in any component's data,
     # so we only need QTM to emit a packet per frame. A video-only (Miqus Video)
