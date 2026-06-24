@@ -100,7 +100,7 @@ def enable_image_camera(settings_xml, target_camera_id):
         is_target = camera.findtext("ID") == target
         camera.find("Enabled").text = "true" if is_target else "false"
         if is_target:
-            for tag, value in (("Format", "jpg"), ("Width", "64"), ("Height", "64")):
+            for tag, value in (("Format", "jpg"), ("Width", "32"), ("Height", "32")):
                 element = camera.find(tag)
                 if element is not None:
                     element.text = value
