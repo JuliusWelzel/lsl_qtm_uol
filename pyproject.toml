@@ -5,6 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "ezc3d>=1.7.0",
+    "matplotlib>=3.11.0",
+    "motionbids>=0.4.0",
+    "pandas>=3.0.3",
     "pylsl>=1.18.2",
     "qtm-rt>=3.1.0",
 ]

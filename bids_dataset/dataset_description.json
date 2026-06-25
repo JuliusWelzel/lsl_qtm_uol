@@ -1,0 +1,9 @@
+{
+  "Name": "Theia3D Motion Dataset",
+  "BIDSVersion": "1.9.0",
+  "Authors": [
+    "Julius Welzel"
+  ],
+  "dataset_type": "raw",
+  "task_description": "Theia3D markerless segment poses"
+}

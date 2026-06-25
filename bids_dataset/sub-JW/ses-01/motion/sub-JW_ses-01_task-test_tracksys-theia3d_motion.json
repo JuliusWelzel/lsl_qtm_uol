@@ -1,0 +1,7 @@
+{
+  "TaskName": "test",
+  "SamplingFrequency": 60.0,
+  "TrackedPointsCount": 18,
+  "RecordingDuration": 120.98333333333333,
+  "RecordingType": "continuous"
+}
