@@ -1,21 +1,33 @@
 """
-    Stream the QTM real-time frame number into LSL.
+    Mark QTM capture start/stop in LSL for post-hoc frame alignment.
 
-    Streams only the QTM frame number (the "frame N of M" shown in QTM) so that
-    other LSL streams (e.g. EEG) can be synchronised to the Qualisys capture
-    timeline afterwards.
+    A video-only (Miqus Video) capture provides no per-frame real-time data
+    (no markers, skeleton, timecode; the image stream does not deliver live),
+    and QTM's documented real-time frame number is only valid when a camera is
+    in marker mode. So streaming a frame number per frame is not possible for a
+    pure-video system.
 
-    A video-only (Miqus Video) capture produces no marker/skeleton/timecode data,
-    so the only per-frame real-time data is the camera image. We enable a tiny RT
-    image for one camera and read the QTM frame number from each packet's header
-    -- the image pixels themselves are never used.
+    Instead we use what QTM *does* send to every connected client regardless of
+    camera mode: capture start/stop events. We push an LSL marker the instant
+    each event arrives, time-stamped on the LSL clock. Recorded alongside your
+    EEG (and any other LSL streams), these markers anchor the Qualisys capture
+    timeline to the LSL timeline.
 
-    Start QTM first, then record live (or Play -> Play with Real-Time output)
-    before running this script.
+    Post-hoc alignment (the Theia workflow):
+      - The "EventCaptureStarted" marker is the LSL time of QTM frame 1.
+      - With the capture frame rate, frame i occurs at:
+            t(i) = t_start + (i - 1) / QTM_FRAME_RATE
+      - For drift-free alignment over long recordings, use the
+        "EventCaptureStopped" marker and Theia's total frame count N instead:
+            fps_effective = (N - 1) / (t_stop - t_start)
+            t(i) = t_start + (i - 1) / fps_effective
+      Theia processes the same recorded video, so its frame indices are QTM's
+      frame numbers (reconcile any 0- vs 1-based offset with one known frame).
+
+    Start QTM first and run this script, then record as usual in QTM.
 """
 
 import asyncio
-import xml.etree.ElementTree as ET
 
 import pylsl
 import qtm_rt
@@ -23,153 +35,87 @@ import qtm_rt
 # QTM host. Use "127.0.0.1" when this script runs on the QTM machine.
 QTM_HOST = "127.0.0.1"
 
-# QTM capture rate in Hz. Adjust to match your project settings.
+# QTM capture rate in Hz. Not streamed -- documented here for the post-hoc
+# frame-time math above. Set it to your actual video capture rate.
 QTM_FRAME_RATE = 85
 
-# Which QTM component to subscribe to. The frame number we push lives in every
-# packet's header regardless of component -- the component only exists to make
-# QTM emit a packet per frame.
-#   "image" -> works for a video-only capture (the only per-frame data video
-#              produces). Requires enabling RT image transmission (done below).
-#   "2d"    -> use this if you put at least one camera in marker mode. Lighter
-#              than images, and QTM's docs say the frame number is only valid
-#              when a camera is in marker mode, so this is the robust choice.
-QTM_COMPONENT = "image"
-
-# ID of the camera to receive RT images from (1 = first camera). Only the frame
-# number in the packet header is used; the image is shrunk to the smallest size
-# so the bandwidth/CPU cost is negligible. Set this to a camera that exists.
-QTM_IMAGE_CAMERA = 1
-
-# Real-time client control password, as set in QTM under
-# Project Options -> Real-Time output. Enabling image transmission is a settings
-# change and requires becoming the controlling "master" client first. Leave as
-# "" if no password is configured in QTM.
-QTM_RT_PASSWORD = ""
-
-# Diagnostic counter of how many packets on_packet has received.
-_packet_count = 0
+# Set by setup() before any event can arrive.
+outlet = None
 
 
-def create_lsl_outlet():
+def create_marker_outlet():
     """
-    Creates and returns an LSL (Lab Streaming Layer) outlet for the QTM frame
-    number.
+    Create an LSL marker outlet for QTM capture events.
 
-    A single int32 channel is used since the frame number is a monotonically
-    increasing integer counter (float32 would lose integer precision beyond
-    ~16.7 million frames).
+    An irregular-rate string marker stream (the standard LSL marker pattern,
+    like LabRecorder markers): each sample is a QTM event name, time-stamped on
+    the LSL clock when the event arrived.
 
     Returns:
-        pylsl.StreamOutlet: The LSL outlet object.
+        pylsl.StreamOutlet: The LSL marker outlet.
     """
     info = pylsl.StreamInfo(
         name="Qualisys",
-        type="framenumber",
+        type="Markers",
         channel_count=1,
-        nominal_srate=QTM_FRAME_RATE,
-        channel_format=pylsl.cf_int32,  # frame number is an integer counter
-        source_id="qtm_framenumber",
+        nominal_srate=pylsl.IRREGULAR_RATE,
+        channel_format=pylsl.cf_string,
+        source_id="qtm_sync",
     )
-    outlet = pylsl.StreamOutlet(info)
-    return outlet
+    return pylsl.StreamOutlet(info)
 
 
-def enable_image_camera(settings_xml, target_camera_id):
+def on_event(event):
     """
-    Turn QTM's image-transmission settings into a settings document that enables
-    a small RT image for a single camera.
-
-    QTM only sends camera images over real-time when a client asks for them, and
-    the request must be QTM's own ``<Image>`` settings block with the root tag
-    renamed to ``QTM_Settings`` (this mirrors the SDK's image_example.py). We
-    fetch the live settings, enable only the target camera, shrink it to a tiny
-    JPEG (we only want the frame number from the packet header, not the pixels),
-    and disable every other camera to keep bandwidth minimal.
+    Handle a QTM real-time event by pushing it to LSL as a marker.
 
     Args:
-        settings_xml: XML returned by ``get_parameters(["image"])``.
-        target_camera_id: ID (int) of the camera to receive images from.
-
-    Returns:
-        str: A ``QTM_Settings`` XML document ready for ``send_xml``.
-    """
-    target = str(target_camera_id)
-    xml = ET.fromstring(settings_xml)
-    for camera in xml.findall("./Image/Camera"):
-        is_target = camera.findtext("ID") == target
-        camera.find("Enabled").text = "true" if is_target else "false"
-        if is_target:
-            for tag, value in (("Format", "jpg"), ("Width", "32"), ("Height", "32")):
-                element = camera.find(tag)
-                if element is not None:
-                    element.text = value
-
-    xml.tag = "QTM_Settings"
-    return ET.tostring(xml).decode("utf-8")
-
-
-def on_packet(packet):
-    """
-    Process a packet received from the Qualisys system.
-    Each iteration of this function pushes the current frame number as a single
-    sample to the LSL outlet.
-
-    Args:
-        packet: The packet received from the Qualisys system.
+        event: A qtm_rt.QRTEvent (e.g. EventCaptureStarted/EventCaptureStopped).
 
     Returns:
         None
     """
-    global _packet_count
-    _packet_count += 1
-    outlet.push_sample([packet.framenumber])
-    # Diagnostic: packet count distinguishes "one packet then silence" (stream
-    # stops) from "many packets all numbered 1" (counter not advancing).
-    print(
-        "packet #{}  framenumber={}  timestamp={}  components={}".format(
-            _packet_count,
-            packet.framenumber,
-            packet.timestamp,
-            list(packet.components.keys()),
-        )
-    )
+    timestamp = pylsl.local_clock()
+    outlet.push_sample([event.name], timestamp=timestamp)
+    print("LSL marker: {}  @ lsl_clock {:.6f}".format(event.name, timestamp))
 
 
 async def setup():
     """
-    Connects to the Qualisys system and sets up an LSL outlet for streaming the
-    QTM real-time frame number (read from each data packet's header).
+    Connect to QTM, open the LSL marker outlet, and forward capture events.
 
     Returns:
         None
     """
-    connection = await qtm_rt.connect(QTM_HOST)
+    global outlet
+    outlet = create_marker_outlet()
+
+    connection = await qtm_rt.connect(QTM_HOST, on_event=on_event)
     if connection is None:
         print("Could not connect to QTM at {}".format(QTM_HOST))
         return
 
-    # create lsl outlet
-    global outlet
-    outlet = create_lsl_outlet()
+    # Sanity check: ask QTM for its current state so on_event fires once now,
+    # confirming the connection and event channel work before we wait for a
+    # recording. (This early marker lands before LabRecorder is armed, so it is
+    # simply not recorded -- only the later capture start/stop matter.)
+    try:
+        await connection.get_state()
+    except asyncio.TimeoutError:
+        print("Connected, but QTM did not report its state within 30 s.")
+
     input("Start LabRecorder ... Press Enter to continue")
+    print("Connected. An LSL marker is pushed on every QTM capture event.")
+    print("Start (and later stop) a recording in QTM. Press Ctrl+C to quit.\n")
 
-    # For a video-only capture we enable a tiny RT image for one camera: it is
-    # the only per-frame data video provides. (Skipped when QTM_COMPONENT is a
-    # marker component such as "2d".) Enabling transmission is a settings change,
-    # so it must happen while we hold control ("master"); TakeControl releases it
-    # again on exit so the QTM operator can still start/stop the recording.
-    if QTM_COMPONENT == "image":
-        settings = await connection.get_parameters(parameters=["image"])
-        image_settings = enable_image_camera(settings, QTM_IMAGE_CAMERA)
-        async with qtm_rt.TakeControl(connection, QTM_RT_PASSWORD):
-            await connection.send_xml(image_settings)
-
-    # Every packet carries the QTM frame number in its header; on_packet reads
-    # packet.framenumber and never touches the component payload.
-    await connection.stream_frames(components=[QTM_COMPONENT], on_packet=on_packet)
+    # Keep the event loop alive so QTM events keep arriving and firing on_event.
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    asyncio.ensure_future(setup())
-    asyncio.get_event_loop().run_forever()
+    try:
+        asyncio.ensure_future(setup())
+        asyncio.get_event_loop().run_forever()
+    except KeyboardInterrupt:
+        pass
